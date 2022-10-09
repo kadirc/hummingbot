@@ -69,6 +69,9 @@ class RateOracle(NetworkBase):
             self.logger().error("Unexpected error while waiting for data feed to get ready.",
                                 exc_info=True)
 
+    def is_ready(self):
+        return self._ready_event.is_set()
+
     @property
     def name(self) -> str:
         return "rate_oracle"

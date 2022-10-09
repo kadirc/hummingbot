@@ -21,10 +21,16 @@ class ConversionRateModel(BaseClientModel, ABC):
     ) -> Tuple[str, str, Decimal, str, str, Decimal]:
         pass
 
+    @abstractmethod
+    def is_ready():
+        pass
 
 class OracleConversionRateMode(ConversionRateModel):
     class Config:
         title = "rate_oracle_conversion_rate"
+
+    def is_ready(self):
+        return RateOracle.get_instance().is_ready()
 
     def get_conversion_rates(
         self, market_pair: MakerTakerMarketPair
@@ -70,6 +76,9 @@ class OracleConversionRateMode(ConversionRateModel):
 
 
 class TakerToMakerConversionRateMode(ConversionRateModel):
+    def is_ready(self, market_pair: MakerTakerMarketPair):
+        return True
+
     taker_to_maker_base_conversion_rate: Decimal = Field(
         default=Decimal("1.0"),
         description="A fixed conversion rate between the maker and taker trading pairs based on the maker base asset.",

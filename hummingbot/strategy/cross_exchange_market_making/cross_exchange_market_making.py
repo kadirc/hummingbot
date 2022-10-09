@@ -395,6 +395,10 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                 if LogOption.STATUS_REPORT:
                     self.logger().info("Markets are ready. Trading started.")
 
+        if not self._config_map.conversion_rate_mode.is_ready():
+            self.logger().warning("Conversion rates unavailable. No market making trades are permitted.")
+            return
+
         if should_report_warnings:
             # Check if all markets are still connected or not. If not, log a warning.
             if not all([market.network_status is NetworkStatus.CONNECTED for market in self.active_markets]):
