@@ -1301,7 +1301,7 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
 
         # Convert maker order size (in maker base asset) to taker order size (in taker base asset)
         _, _, quote_rate, _, _, base_rate, _, _, gas_rate = self.get_conversion_rates(market_pair)
-        size *= base_rate
+        size *= self.markettaker_to_maker_base_conversion_rate(market_pair)
 
         # Calculate the next price from the top, and the order size limit.
         if is_bid:
@@ -1320,12 +1320,6 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                     taker_price = taker_market.get_vwap_for_volume(taker_trading_pair, False, size).result_price
                 except ZeroDivisionError:
                     return None
-
-            # If quote assets are not same, convert them from taker's quote asset to maker's quote asset
-            if market_pair.maker.quote_asset != market_pair.taker.quote_asset:
-                taker_price *= self.markettaker_to_maker_base_conversion_rate(market_pair)
-
-            return taker_price
         else:
             # Maker sell
             # Taker buy
@@ -1343,11 +1337,8 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                 except ZeroDivisionError:
                     return None
 
-            # If quote assets are not same, convert them from taker's quote asset to maker's quote asset
-            if market_pair.maker.quote_asset != market_pair.taker.quote_asset:
-                taker_price *= self.markettaker_to_maker_base_conversion_rate(market_pair)
-
-            return taker_price
+        taker_price *= self.markettaker_to_maker_base_conversion_rate(market_pair)
+        return taker_price
 
     def get_suggested_price_samples(self, market_pair: MakerTakerMarketPair):
         """
