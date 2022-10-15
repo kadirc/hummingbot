@@ -858,16 +858,13 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
 
         taker_market = market_pair.taker.market
 
-        # Convert maker order size (in maker base asset) to taker order size (in taker base asset)
-        _, _, quote_rate, _, _, base_rate, _, _, _ = self.get_conversion_rates(market_pair)
-
         if buy_fill_quantity > 0:
             # Maker buy
             # Taker sell
             taker_slippage_adjustment_factor = Decimal("1") - self.slippage_buffer
 
             hedged_order_quantity = min(
-                buy_fill_quantity * base_rate,
+                buy_fill_quantity * self.markettaker_to_maker_base_conversion_rate(market_pair),
                 taker_market.get_available_balance(market_pair.taker.base_asset) *
                 self.order_size_taker_balance_factor
             )
@@ -941,7 +938,7 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                 taker_price = await market_pair.taker.market.get_order_price(
                     taker_trading_pair,
                     True,
-                    sell_fill_quantity * base_rate
+                    sell_fill_quantity * self.markettaker_to_maker_base_conversion_rate(market_pair)
                 )
                 if taker_price is None:
                     self.logger().warning("Gateway: failed to obtain order price. No hedging order will be submitted.")
@@ -950,11 +947,11 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                 taker_price = taker_market.get_price_for_volume(
                     taker_trading_pair,
                     True,
-                    sell_fill_quantity * base_rate
+                    sell_fill_quantity * self.markettaker_to_maker_base_conversion_rate(market_pair)
                 ).result_price
 
             hedged_order_quantity = min(
-                sell_fill_quantity * base_rate,
+                sell_fill_quantity * self.markettaker_to_maker_base_conversion_rate(market_pair),
                 taker_market.get_available_balance(market_pair.taker.quote_asset) /
                 taker_price * self.order_size_taker_balance_factor
             )
@@ -1139,19 +1136,10 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
         :param size: size of the maker order.
         :return: a Decimal which is the price or None if order cannot be hedged on the taker market
         """
-        taker_trading_pair = market_pair.taker.trading_pair
         maker_market = market_pair.maker.market
-        taker_market = market_pair.taker.market
         top_bid_price = s_decimal_nan
         top_ask_price = s_decimal_nan
         next_price_below_top_ask = s_decimal_nan
-
-        # Convert maker order size (in maker base asset) to taker order size (in taker base asset)
-        _, _, quote_rate, base_pair, _, base_rate, _, _, _ = self.get_conversion_rates(market_pair)
-        if base_rate is None:
-            self.logger().warning(f"Can't find a conversion rate for {base_pair}, using 1.0 instead.")
-            base_rate = Decimal("1")
-        size *= base_rate
 
         top_bid_price, top_ask_price = self.get_top_bid_ask_from_price_samples(market_pair)
 
@@ -1166,26 +1154,9 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                 )
                 price_above_bid = (ceil(top_bid_price / price_quantum) + 1) * price_quantum
 
-            if self.is_gateway_market(market_pair.taker):
-                taker_price = await taker_market.get_order_price(taker_trading_pair,
-                                                                 False,
-                                                                 size)
-                if taker_price is None:
-                    self.logger().warning("Gateway: failed to obtain order price."
-                                          "No market making order will be submitted.")
-                    return s_decimal_nan
-            else:
-                try:
-                    taker_price = taker_market.get_vwap_for_volume(taker_trading_pair, False, size).result_price
-                except ZeroDivisionError:
-                    return s_decimal_nan
-
-            if taker_price is None:
-                return
-
-            # If quote assets are not same, convert them from taker's quote asset to maker's quote asset
-            if market_pair.maker.quote_asset != market_pair.taker.quote_asset:
-                taker_price *= self.markettaker_to_maker_base_conversion_rate(market_pair)
+            taker_price = await self.calculate_effective_hedging_price(market_pair,
+                                                                       True,
+                                                                       size)
 
             # you are buying on the maker market and selling on the taker market
             maker_price = taker_price / (1 + self.min_profitability)
@@ -1216,22 +1187,9 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                 )
                 next_price_below_top_ask = (floor(top_ask_price / price_quantum) - 1) * price_quantum
 
-            if self.is_gateway_market(market_pair.taker):
-                taker_price = await taker_market.get_order_price(taker_trading_pair,
-                                                                 True,
-                                                                 size)
-                if taker_price is None:
-                    self.logger().warning("Gateway: failed to obtain order price."
-                                          "No market making order will be submitted.")
-                    return s_decimal_nan
-            else:
-                try:
-                    taker_price = taker_market.get_vwap_for_volume(taker_trading_pair, True, size).result_price
-                except ZeroDivisionError:
-                    return s_decimal_nan
-
-            if market_pair.maker.quote_asset != market_pair.taker.quote_asset:
-                taker_price *= self.markettaker_to_maker_base_conversion_rate(market_pair)
+            taker_price = await self.calculate_effective_hedging_price(market_pair,
+                                                                       False,
+                                                                       size)
 
             # You are selling on the maker market and buying on the taker market
             maker_price = taker_price * (1 + self.min_profitability)
@@ -1608,7 +1566,7 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                         True,
                         bid_size
                     )
-                    effective_hedging_price_adjusted = effective_hedging_price / \
+                    hedging_price_on_taker = effective_hedging_price / \
                         self.markettaker_to_maker_base_conversion_rate(market_pair)
                     if LogOption.CREATE_ORDER in self.logging_options:
                         self.log_with_clock(
@@ -1616,8 +1574,8 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                             f"({market_pair.maker.trading_pair}) Creating limit bid order for "
                             f"{bid_size} {market_pair.maker.base_asset} at "
                             f"{bid_price} {market_pair.maker.quote_asset}. "
-                            f"Current hedging price: {effective_hedging_price:.8f} {market_pair.maker.quote_asset} "
-                            f"(Rate adjusted: {effective_hedging_price_adjusted:.8f} {market_pair.taker.quote_asset})."
+                            f"Current hedging price: {hedging_price_on_taker:.8f} {market_pair.taker.quote_asset} "
+                            f"(Rate adjusted hedging price: {effective_hedging_price:.8f} {market_pair.maker.quote_asset})."
                         )
                     self.place_order(market_pair, True, True, bid_size, bid_price)
                 else:
@@ -1647,7 +1605,7 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                         False,
                         ask_size
                     )
-                    effective_hedging_price_adjusted = effective_hedging_price / \
+                    hedging_price_on_taker = effective_hedging_price / \
                         self.markettaker_to_maker_base_conversion_rate(market_pair)
                     if LogOption.CREATE_ORDER in self.logging_options:
                         self.log_with_clock(
@@ -1655,8 +1613,8 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
                             f"({market_pair.maker.trading_pair}) Creating limit ask order for "
                             f"{ask_size} {market_pair.maker.base_asset} at "
                             f"{ask_price} {market_pair.maker.quote_asset}. "
-                            f"Current hedging price: {effective_hedging_price:.8f} {market_pair.maker.quote_asset} "
-                            f"(Rate adjusted: {effective_hedging_price_adjusted:.8f} {market_pair.taker.quote_asset})."
+                            f"Current hedging price: {hedging_price_on_taker:.8f} {market_pair.taker.quote_asset} "
+                            f"(Rate adjusted: {effective_hedging_price:.8f} {market_pair.maker.quote_asset})."
                         )
                     self.place_order(market_pair, False, True, ask_size, ask_price)
                 else:
