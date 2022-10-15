@@ -1079,16 +1079,11 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
         :param is_bid: Whether the order to make will be bid or ask.
         :return: a Decimal which is the size of maker order.
         """
-        taker_trading_pair = market_pair.taker.trading_pair
         maker_market = market_pair.maker.market
         taker_market = market_pair.taker.market
 
         # Maker order size (in base asset)
         size = self.get_adjusted_limit_order_size(market_pair)
-
-        # Convert maker order size (in maker base asset) to taker order size (in taker base asset)
-        _, _, quote_rate, _, _, base_rate, _, _, _ = self.get_conversion_rates(market_pair)
-        size *= base_rate
 
         if is_bid:
             # Maker buy
@@ -1096,31 +1091,16 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
             maker_balance_in_quote = maker_market.get_available_balance(market_pair.maker.quote_asset)
             taker_balance = taker_market.get_available_balance(market_pair.taker.base_asset) * \
                 self.order_size_taker_balance_factor
-
-            if self.is_gateway_market(market_pair.taker):
-                taker_price = await taker_market.get_order_price(taker_trading_pair,
-                                                                 False,
-                                                                 size)
-                if taker_price is None:
-                    self.logger().warning("Gateway: failed to obtain order price."
-                                          "No market making order will be submitted.")
-                    return s_decimal_zero
-            else:
-                try:
-                    taker_price = taker_market.get_vwap_for_volume(
-                        taker_trading_pair, False, size
-                    ).result_price
-                except ZeroDivisionError:
-                    assert size == s_decimal_zero
-                    return s_decimal_zero
-
+            taker_price = await self.calculate_effective_hedging_price(market_pair,
+                                                                       True,
+                                                                       size)
             if taker_price is None:
                 self.logger().warning("Failed to obtain a taker sell order price. No order will be submitted.")
                 order_amount = Decimal("0")
             else:
                 maker_balance = maker_balance_in_quote / taker_price
+                taker_balance = taker_balance / self.markettaker_to_maker_base_conversion_rate(market_pair)
                 order_amount = min(maker_balance, taker_balance, size)
-
             return maker_market.quantize_order_amount(market_pair.maker.trading_pair, Decimal(order_amount))
 
         else:
@@ -1130,22 +1110,9 @@ class CrossExchangeMarketMakingStrategy(StrategyPyBase):
             taker_balance_in_quote = taker_market.get_available_balance(market_pair.taker.quote_asset) * \
                 self.order_size_taker_balance_factor
 
-            if self.is_gateway_market(market_pair.taker):
-                taker_price = await taker_market.get_order_price(taker_trading_pair,
-                                                                 True,
-                                                                 size)
-                if taker_price is None:
-                    self.logger().warning("Gateway: failed to obtain order price."
-                                          "No market making order will be submitted.")
-                    return s_decimal_zero
-            else:
-                try:
-                    taker_price = taker_market.get_price_for_quote_volume(
-                        taker_trading_pair, True, taker_balance_in_quote
-                    ).result_price
-                except ZeroDivisionError:
-                    assert size == s_decimal_zero
-                    return s_decimal_zero
+            taker_price = await self.calculate_effective_hedging_price(market_pair,
+                                                                       False,
+                                                                       size)
 
             if taker_price is None:
                 self.logger().warning("Failed to obtain a taker buy order price. No order will be submitted.")
